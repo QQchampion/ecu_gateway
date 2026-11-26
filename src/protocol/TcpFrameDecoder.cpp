@@ -41,3 +41,9 @@ void TcpFrameDecoder::reset()
 {
     buffer_.clear();
 }
+
+// 判断是否有未处理完的报文数据
+bool TcpFrameDecoder::has_pending_data() const
+{
+    return !buffer_.empty();
+}

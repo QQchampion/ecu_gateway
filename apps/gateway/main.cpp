@@ -1,12 +1,39 @@
-#include "protocol/TcpFrameCodec.h"
+#include "message/MessageJsonCodec.h"
 #include "protocol/TcpFrameDecoder.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
 #include <iostream>
-#include <string>
+#include <variant>
 #include <sys/socket.h>
 #include <unistd.h>
+
+namespace {
+
+const char* device_name(message::DeviceId id)
+{
+    switch (id) {
+        case message::DeviceId::POWER_ECU: return "Power ECU";
+        case message::DeviceId::BCM_ECU: return "BCM ECU";
+        case message::DeviceId::CLUSTER_ECU: return "Cluster ECU";
+        case message::DeviceId::GATEWAY: return "Gateway";
+        case message::DeviceId::EXTERNAL_CLIENT: return "External Client";
+    }
+    return "Unknown";
+}
+
+const char* engine_status_name(message::EngineStatus status)
+{
+    switch (status) {
+        case message::EngineStatus::STOPPED: return "STOPPED";
+        case message::EngineStatus::STARTING: return "STARTING";
+        case message::EngineStatus::RUNNING: return "RUNNING";
+        case message::EngineStatus::FAULT: return "FAULT";
+    }
+    return "UNKNOWN";
+}
+
+}  // namespace
 
 int main()
 {
@@ -63,11 +90,16 @@ int main()
             return 1;
         }
         if (count == 0) {
-            // 表示客户端已经正常关闭连接
-            std::cerr << "client disconnected before complete frame\n";
+            if (decoder.has_pending_data()) {
+                std::cerr << "protocol error: incomplete frame at disconnect\n";
+                close(client_fd);
+                close(server_fd);
+                return 1;
+            }
+            std::cout << "Client disconnected\n";
             close(client_fd);
             close(server_fd);
-            return 1;
+            return 0;
         }
         // 调用解析传输帧函数decoder.feed()
         auto messages = decoder.feed(buffer, static_cast<std::size_t>(count));
@@ -77,41 +109,30 @@ int main()
             close(server_fd);
             return 1;
         }
-        for (const auto& message : *messages) { // 一次解析会有多条报文，故用for
-                std::cout << "Received: " << message << '\n';
-                if (message != "speed=60") continue;
-
-                // 6、准备发送回应ACK
-                // 6.1、封装ACK
-                const auto ack = encode_tcp_frame("ACK: received");
-                if (!ack) { // 封装ACK失败
-                    std::cerr << "protocol error: ACK encoding failed\n";
-                    close(client_fd);
-                    close(server_fd);
-                    return 1;
-                }
-                // 6.2、发送ACK
-                std::size_t sent = 0;
-                while (sent < ack->size()) {
-                    const ssize_t written = send(client_fd, ack->data() + sent, ack->size() - sent, MSG_NOSIGNAL);
-                    if (written < 0) { // 失败
-                        if (errno == EINTR) continue;
-                        std::cerr << "send failed: " << std::strerror(errno) << '\n';
-                        close(client_fd);
-                        close(server_fd);
-                        return 1;
-                    }
-                    if (written == 0) { // 未发送
-                        std::cerr << "send failed: no bytes sent\n";
-                        close(client_fd);
-                        close(server_fd);
-                        return 1;
-                    }
-                    sent += static_cast<std::size_t>(written);
-                }
+        for (const auto& body : *messages) {
+            const auto received = message::deserialize_message(body);
+            if (!received) {
+                std::cerr << "message error: invalid JSON business message\n";
                 close(client_fd);
                 close(server_fd);
-                return 0;
+                return 1;
+            }
+            std::cout << "Route target: " << device_name(received->dst_id) << '\n';
+            if (received->msg_type != message::MessageType::STATUS ||
+                received->src_id != message::DeviceId::POWER_ECU ||
+                received->dst_id != message::DeviceId::CLUSTER_ECU ||
+                !std::holds_alternative<message::StatusPayload>(received->payload)) {
+                std::cerr << "message error: unexpected message type or device ID\n";
+                close(client_fd);
+                close(server_fd);
+                return 1;
+            }
+            const auto& status = std::get<message::StatusPayload>(received->payload);
+            std::cout << "STATUS: speed_kmh=" << status.speed_kmh
+                      << ", rpm=" << status.rpm
+                      << ", coolant_temp_c=" << status.coolant_temp_c
+                      << ", engine_status=" << engine_status_name(status.engine_status)
+                      << '\n';
         }
     }
 }

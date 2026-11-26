@@ -1,5 +1,5 @@
 #include "protocol/TcpFrameCodec.h"
-#include "protocol/TcpFrameDecoder.h"
+#include "message/MessageJsonCodec.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -32,10 +32,23 @@ int main()
 
     std::cout << "Connected to Gateway" << std::endl;
 
-    // 4、准备发送的数据
-    // 封装发送的数据
-    const auto message = encode_tcp_frame("speed=60");
-    if (!message) {
+    // 4、构造并序列化 STATUS 业务消息
+    const message::StatusPayload status{60.0, 2000, 85.0, message::EngineStatus::RUNNING};
+    const message::Message status_message{
+        message::DeviceId::POWER_ECU,
+        message::DeviceId::CLUSTER_ECU,
+        message::MessageType::STATUS,
+        1,
+        status
+    };
+    const auto json_text = message::serialize_message(status_message);
+    if (!json_text) {
+        std::cerr << "message error: JSON serialization failed\n";
+        close(socket_fd);
+        return 1;
+    }
+    const auto frame = encode_tcp_frame(*json_text);
+    if (!frame) {
         std::cerr << "protocol error: frame encoding failed\n";
         close(socket_fd);
         return 1;
@@ -43,10 +56,10 @@ int main()
     std::size_t sent = 0; // 已发送长度
 
     // 5、发送数据
-    while (sent < message->size()) { // 判断条件：只要没发完，继续发
+    while (sent < frame->size()) { // 判断条件：只要没发完，继续发
         // send()用于向服务器发送数据
         // send(套接字、发送具体位置、最多发送字节、默认发送位置)
-        const ssize_t count = send(socket_fd, message->data() + sent, message->size() - sent, MSG_NOSIGNAL);
+        const ssize_t count = send(socket_fd, frame->data() + sent, frame->size() - sent, MSG_NOSIGNAL);
         if (count < 0) {
             if (errno == EINTR) continue;
             std::cerr << "send failed: " << std::strerror(errno) << '\n';
@@ -61,40 +74,6 @@ int main()
         sent += static_cast<std::size_t>(count);
     }
 
-    // 6、接收数据
-    TcpFrameDecoder decoder;
-    std::uint8_t buffer[256];
-    while (true) {
-        const ssize_t count = recv(socket_fd, buffer, sizeof(buffer), 0);
-        if (count < 0) { // 接收出现错误
-            if (errno == EINTR) continue;
-            std::cerr << "recv failed: " << std::strerror(errno) << '\n';
-            close(socket_fd);
-            return 1;
-        }
-        if (count == 0) { // 表示客户端已经正常关闭连接
-            std::cerr << "Gateway disconnected before complete ACK frame\n";
-            close(socket_fd);
-            return 1;
-        }
-        // 接收成功
-        // 拆解封装
-        auto messages = decoder.feed(buffer, static_cast<std::size_t>(count));
-        if (!messages) {
-            std::cerr << "protocol error: invalid ACK frame\n";
-            close(socket_fd);
-            return 1;
-        }
-        // 解析服务器的ACK回应
-        for (const auto& ack : *messages) {
-            if (ack != "ACK: received") {
-                std::cerr << "unexpected ACK: " << ack << '\n';
-                close(socket_fd);
-                return 1;
-            }
-            std::cout << ack << '\n';
-            close(socket_fd);
-            return 0;
-        }
-    }
+    close(socket_fd);
+    return 0;
 }
