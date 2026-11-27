@@ -22,6 +22,10 @@ target_link_libraries(message_json_codec PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(gateway PRIVATE message_json_codec)
 target_link_libraries(power_ecu PRIVATE message_json_codec)
 
+add_library(connection_manager STATIC src/gateway/ConnectionManager.cpp)
+target_include_directories(connection_manager PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(gateway PRIVATE connection_manager)
+
 add_executable(tcp_frame_codec_test tests/tcp_frame_codec_test.cpp)
 target_link_libraries(tcp_frame_codec_test PRIVATE protocol)
 
@@ -30,3 +34,6 @@ target_link_libraries(tcp_frame_decoder_test PRIVATE protocol)
 
 add_executable(message_json_codec_test tests/message_json_codec_test.cpp)
 target_link_libraries(message_json_codec_test PRIVATE message_json_codec nlohmann_json::nlohmann_json)
+
+add_executable(connection_manager_test tests/connection_manager_test.cpp)
+target_link_libraries(connection_manager_test PRIVATE connection_manager)

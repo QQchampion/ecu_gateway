@@ -33,7 +33,10 @@ int main()
     std::cout << "Connected to Gateway" << std::endl;
 
     // 4、构造并序列化 STATUS 业务消息
+    // 4、构造业务消息
+    // 1.创建StatusPayload
     const message::StatusPayload status{60.0, 2000, 85.0, message::EngineStatus::RUNNING};
+    // 2.创建Message对象
     const message::Message status_message{
         message::DeviceId::POWER_ECU,
         message::DeviceId::CLUSTER_ECU,
@@ -41,12 +44,14 @@ int main()
         1,
         status
     };
+    // 3.json序列化
     const auto json_text = message::serialize_message(status_message);
     if (!json_text) {
         std::cerr << "message error: JSON serialization failed\n";
         close(socket_fd);
         return 1;
     }
+    // 4.TCP封装
     const auto frame = encode_tcp_frame(*json_text);
     if (!frame) {
         std::cerr << "protocol error: frame encoding failed\n";
