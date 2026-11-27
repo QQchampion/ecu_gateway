@@ -26,6 +26,14 @@ add_library(connection_manager STATIC src/gateway/ConnectionManager.cpp)
 target_include_directories(connection_manager PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gateway PRIVATE connection_manager)
 
+add_library(tcp_sender STATIC src/gateway/TcpSender.cpp)
+target_include_directories(tcp_sender PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(tcp_sender PUBLIC connection_manager)
+target_link_libraries(gateway PRIVATE tcp_sender)
+
+add_executable(tcp_sender_test tests/tcp_sender_test.cpp)
+target_link_libraries(tcp_sender_test PRIVATE tcp_sender protocol)
+
 add_executable(tcp_frame_codec_test tests/tcp_frame_codec_test.cpp)
 target_link_libraries(tcp_frame_codec_test PRIVATE protocol)
 
