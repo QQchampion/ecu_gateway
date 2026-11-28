@@ -4,9 +4,37 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+
+namespace {
+
+// 发送消息机制
+bool send_message(int fd, const message::Message& message)
+{
+    // 3.json序列化
+    // 1. json序列化
+    const auto json = message::serialize_message(message);
+    if (!json) return false;
+    // 4.TCP封装
+    // 2. TCP封装信息
+    const auto frame = encode_tcp_frame(*json);
+    if (!frame) return false;
+    // 3. 发送信息的字节
+    std::size_t offset = 0; // 已发送长度
+    while (offset < frame->size()) { // 判断条件：只要没发完，继续发
+        // send()用于向服务器发送数据
+        // send(套接字、发送具体位置、最多发送字节、默认发送位置)
+        const ssize_t count = send(fd, frame->data() + offset, frame->size() - offset, MSG_NOSIGNAL);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return false;
+        offset += static_cast<std::size_t>(count);
+    }
+    return true;
+}
+}
 
 int main()
 {
@@ -34,51 +62,44 @@ int main()
 
     // 4、构造并序列化 STATUS 业务消息
     // 4、构造业务消息
+    // 4. 构造业务消息
+    // 创建心跳信息
+    const message::Message heartbeat{message::DeviceId::POWER_ECU,
+        message::DeviceId::GATEWAY, message::MessageType::HEARTBEAT, 1,
+        message::HeartbeatPayload{}};
+    if (!send_message(socket_fd, heartbeat)) {
+        std::cerr << "heartbeat send failed\n";
+        close(socket_fd);
+        return 1;
+    }
+
+    // 创建 状态上报消息
     // 1.创建StatusPayload
+        // 创建StatusPayload
     const message::StatusPayload status{60.0, 2000, 85.0, message::EngineStatus::RUNNING};
     // 2.创建Message对象
-    const message::Message status_message{
+        // 创建Message对象
+    message::Message status_message{
         message::DeviceId::POWER_ECU,
         message::DeviceId::CLUSTER_ECU,
         message::MessageType::STATUS,
-        1,
+        2,
         status
     };
-    // 3.json序列化
-    const auto json_text = message::serialize_message(status_message);
-    if (!json_text) {
-        std::cerr << "message error: JSON serialization failed\n";
-        close(socket_fd);
-        return 1;
-    }
-    // 4.TCP封装
-    const auto frame = encode_tcp_frame(*json_text);
-    if (!frame) {
-        std::cerr << "protocol error: frame encoding failed\n";
-        close(socket_fd);
-        return 1;
-    }
-    std::size_t sent = 0; // 已发送长度
 
+    while (true) {
     // 5、发送数据
-    while (sent < frame->size()) { // 判断条件：只要没发完，继续发
-        // send()用于向服务器发送数据
-        // send(套接字、发送具体位置、最多发送字节、默认发送位置)
-        const ssize_t count = send(socket_fd, frame->data() + sent, frame->size() - sent, MSG_NOSIGNAL);
-        if (count < 0) {
-            if (errno == EINTR) continue;
-            std::cerr << "send failed: " << std::strerror(errno) << '\n';
+    if (!send_message(socket_fd, status_message)) {
+            std::cerr << "STATUS send failed\n";
             close(socket_fd);
             return 1;
-        }
-        if (count == 0) {
-            std::cerr << "send failed: no bytes sent\n";
-            close(socket_fd);
-            return 1;
-        }
-        sent += static_cast<std::size_t>(count);
     }
 
+    // 信息发送序号是否为最大值
+    if (status_message.seq == std::numeric_limits<std::uint32_t>::max()) break;
+    ++status_message.seq;
+    sleep(1);
+    }
     close(socket_fd);
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "message/MessageJsonCodec.h"
 #include "gateway/ConnectionManager.h"
 #include "gateway/TcpSender.h"
+#include "protocol/TcpFrameCodec.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -45,7 +46,18 @@ const char* engine_status_name(message::EngineStatus status)
     return "UNKNOWN";
 }
 
-bool process_data(Connection& connection, const std::uint8_t* data, std::size_t size)
+// 关闭 Socket 的套件字
+void close_client(int epoll_fd, ConnectionManager& connections, int fd)
+{
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) < 0)
+        std::cerr << "epoll delete failed: " << std::strerror(errno) << '\n';
+    connections.remove_connection(fd);
+    close(fd);
+}
+
+// 处理接收到消息
+bool process_data(int epoll_fd, ConnectionManager& connections, int fd, Connection& connection,
+                  const std::uint8_t* data, std::size_t size)
 {
     // 获取数据并校验帧
     auto messages = connection.decoder.feed(data, size);
@@ -58,6 +70,24 @@ bool process_data(Connection& connection, const std::uint8_t* data, std::size_t 
         const auto received = message::deserialize_message(body);
         if (!received) {
             std::cerr << "message error: invalid JSON business message\n";
+            return false;
+        }
+        // 信息为 HEARTBEAT 心跳
+        if (received->msg_type == message::MessageType::HEARTBEAT) {
+            // 校验 HEARTBEAT 心跳 是否合法
+            if (received->dst_id != message::DeviceId::GATEWAY || // 接收对象不是网关
+                !std::holds_alternative<message::HeartbeatPayload>(received->payload) || // 消息不是心跳
+                (connection.device_id && *connection.device_id != received->src_id) || // 防止冒充
+                (!connection.device_id && !connections.register_device(fd, received->src_id))) { // 未登记设备注册失败
+                std::cerr << "protocol error: invalid device registration\n";
+                return false;
+            }
+            // 校验成功，登记设备
+            std::cout << "Registered: " << device_name(received->src_id) << std::endl;
+            continue;
+        }
+        if (!connection.device_id || *connection.device_id != received->src_id) {
+            std::cerr << "protocol error: unregistered or mismatched source\n";
             return false;
         }
         // 校验 STATUS 消息
@@ -75,6 +105,27 @@ bool process_data(Connection& connection, const std::uint8_t* data, std::size_t 
                   << ", rpm=" << status.rpm
                   << ", coolant_temp_c=" << status.coolant_temp_c
                   << ", engine_status=" << engine_status_name(status.engine_status) << '\n';
+
+        // 网关 转发至 目标id
+        const auto target_fd = connections.find_fd_by_device(received->dst_id);
+        // 校验目标id
+        if (!target_fd || !connections.find_by_fd(*target_fd)) {
+            std::cerr << "route target unavailable: " << device_name(received->dst_id) << '\n';
+            continue;
+        }
+        // 将转发的信息 json序列化
+        const auto json = message::serialize_message(*received);
+        // 封装
+        const auto frame = json ? encode_tcp_frame(*json) : std::nullopt;
+        if (!frame) {
+            std::cerr << "message error: forwarding encoding failed\n";
+            return false;
+        }
+        // 发送
+        if (!queue_tcp_frame(epoll_fd, connections, *target_fd, *frame)) {
+            std::cerr << "route target send failed: " << device_name(received->dst_id) << '\n';
+            close_client(epoll_fd, connections, *target_fd);
+        }
     }
     return true;
 }
@@ -105,6 +156,12 @@ int main()
     address.sin_family = AF_INET; //使用 IPv4
     address.sin_port = htons(5000); //设置端口 5000
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); //设置 IP 为 127.0.0.1
+    const int reuse_address = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse_address, sizeof(reuse_address)) < 0) {
+        std::cerr << "setsockopt failed: " << std::strerror(errno) << '\n';
+        close(server_fd);
+        return 1;
+    }
     // 绑定服务器socket与ip端口
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
         std::cerr << "bind failed: " << std::strerror(errno) << '\n';
@@ -201,6 +258,7 @@ int main()
             }
             // 若不是服务器发生事件，而是其余客户但发出
             // 1.查找对应时间对应的连接
+            // 1.查找对应fd对应的连接
             Connection* connection = connections.find_by_fd(fd);
             if (!connection) continue;
             bool disconnect = false;
@@ -209,7 +267,7 @@ int main()
                 // recv()用于接收数据
                 const ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
                 if (count > 0) { // 接收成功
-                    if (!process_data(*connection, buffer, static_cast<std::size_t>(count))) {
+                    if (!process_data(epoll_fd, connections, fd, *connection, buffer, static_cast<std::size_t>(count))) {
                         disconnect = true;
                         break;
                     }
@@ -243,10 +301,7 @@ int main()
             }
             // 清理客户端连接
             if (disconnect) {
-                if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) < 0)
-                    std::cerr << "epoll delete failed: " << std::strerror(errno) << '\n';
-                connections.remove_connection(fd);
-                close(fd);
+                close_client(epoll_fd, connections, fd);
             }
         }
     }

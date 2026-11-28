@@ -10,17 +10,20 @@ find_package(nlohmann_json REQUIRED)
 
 add_executable(gateway apps/gateway/main.cpp)
 add_executable(power_ecu apps/power_ecu/main.cpp)
+add_executable(cluster_ecu apps/cluster_ecu/main.cpp)
 
 add_library(protocol STATIC src/protocol/TcpFrameCodec.cpp src/protocol/TcpFrameDecoder.cpp)
 target_include_directories(protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gateway PRIVATE protocol)
 target_link_libraries(power_ecu PRIVATE protocol)
+target_link_libraries(cluster_ecu PRIVATE protocol)
 
 add_library(message_json_codec STATIC src/message/MessageJsonCodec.cpp)
 target_include_directories(message_json_codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(message_json_codec PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(gateway PRIVATE message_json_codec)
 target_link_libraries(power_ecu PRIVATE message_json_codec)
+target_link_libraries(cluster_ecu PRIVATE message_json_codec)
 
 add_library(connection_manager STATIC src/gateway/ConnectionManager.cpp)
 target_include_directories(connection_manager PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
